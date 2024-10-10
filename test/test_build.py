@@ -35,6 +35,7 @@ class ImageBuildResult(NamedTuple):
     img_type: str
     img_path: str
     img_arch: str
+    osinfo_template: str
     container_ref: str
     rootfs: str
     username: str
@@ -135,6 +136,7 @@ def build_images(shared_tmpdir, build_container, request, force_aws_upload):
         "raw": pathlib.Path(output_path) / "image/disk.raw",
         "vmdk": pathlib.Path(output_path) / "vmdk/disk.vmdk",
         "vhd": pathlib.Path(output_path) / "vpc/disk.vhd",
+        "gce": pathlib.Path(output_path) / "gce/image.tgz",
         "anaconda-iso": pathlib.Path(output_path) / "bootiso/install.iso",
     }
     assert len(artifact) == len(set(tc.image for tc in gen_testcases("all"))), \
@@ -161,9 +163,9 @@ def build_images(shared_tmpdir, build_container, request, force_aws_upload):
             journal_output = journal_log_path.read_text(encoding="utf8")
             bib_output = bib_output_path.read_text(encoding="utf8")
             results.append(ImageBuildResult(
-                image_type, generated_img, tc.target_arch, tc.container_ref, tc.rootfs,
-                username, password, ssh_keyfile_private_path,
-                kargs, bib_output, journal_output))
+                image_type, generated_img, tc.target_arch, tc.osinfo_template,
+                tc.container_ref, tc.rootfs, username, password,
+                ssh_keyfile_private_path, kargs, bib_output, journal_output))
 
     # generate new keyfile
     if not ssh_keyfile_private_path.exists():
@@ -296,9 +298,9 @@ def build_images(shared_tmpdir, build_container, request, force_aws_upload):
     results = []
     for image_type in image_types:
         results.append(ImageBuildResult(
-            image_type, artifact[image_type], tc.target_arch, tc.container_ref, tc.rootfs,
-            username, password, ssh_keyfile_private_path,
-            kargs, bib_output, journal_output, metadata))
+            image_type, artifact[image_type], tc.target_arch, tc.osinfo_template,
+            tc.container_ref, tc.rootfs, username, password,
+            ssh_keyfile_private_path, kargs, bib_output, journal_output, metadata))
     yield results
 
     # Try to cache as much as possible
@@ -451,10 +453,27 @@ def test_iso_installs(image_type):
         assert_kernel_args(vm, image_type)
 
 
+@pytest.mark.skipif(platform.system() != "Linux", reason="osinfo detect test only runs on linux right now")
+@pytest.mark.parametrize("image_type", gen_testcases("anaconda-iso"), indirect=["image_type"])
+def test_iso_os_detection(image_type):
+    installer_iso_path = image_type.img_path
+    arch = image_type.img_arch
+    if not arch:
+        arch = platform.machine()
+    osinfo = image_type.osinfo_template.format(arch=arch)
+    result = subprocess.run([
+        "osinfo-detect",
+        installer_iso_path,
+    ], capture_output=True, text=True, check=True)
+    osinfo_output = result.stdout
+    expected_output = f"Media is bootable.\nMedia is an installer for OS '{osinfo}'\n"
+    assert osinfo_output == expected_output
+
+
 @pytest.mark.parametrize("images", gen_testcases("multidisk"), indirect=["images"])
 def test_multi_build_request(images):
     artifacts = set()
-    expected = {"disk.qcow2", "disk.raw", "disk.vhd", "disk.vmdk"}
+    expected = {"disk.qcow2", "disk.raw", "disk.vhd", "disk.vmdk", "image.tgz"}
     for result in images:
         filename = os.path.basename(result.img_path)
         assert result.img_path.exists()
